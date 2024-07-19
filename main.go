@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
+	"runtime"
+	"sync"
 
 	"github.com/PuerkitoBio/goquery"
 )
@@ -16,6 +19,10 @@ const (
 	pvpSelector      = "#carbon_fields_fiis_header-2 > div > div > div.headerTicker__content > div.headerTicker__content__info > div > div:nth-child(4) > p:nth-child(1) > b"
 	segmentoSelector = "#carbon_fields_fiis_informations-2 > div.moreInfo.wrapper > p:nth-child(6) > b"
 )
+
+type Resource struct {
+	Tickers []Ticker `json:"tickers"`
+}
 
 type Ticker struct {
 	Nome     string `json:"nome"`
@@ -44,33 +51,65 @@ func main() {
 		}
 	})
 
+	workers := runtime.NumCPU()
+	chunks := int(math.Ceil(float64(len(urls)) / float64(workers)))
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
 	tickers := []Ticker{}
-	for _, url := range urls {
-		content, err := fetch(url)
-		if err != nil {
-			return
+	for i := 0; i < len(urls); i += chunks {
+		end := i + chunks
+		if end > len(urls) {
+			end = len(urls)
 		}
 
-		doc, err := goquery.NewDocumentFromReader(content)
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
+		chunk := urls[i:end]
 
-		tickers = append(tickers, Ticker{
-			Nome:     doc.Find(nomeSelector).Text(),
-			DY:       doc.Find(dySelector).Text(),
-			PVP:      doc.Find(pvpSelector).Text(),
-			Segmento: doc.Find(segmentoSelector).Text(),
-		})
+		// worker
+		wg.Add(1)
+		go func(urls []string) {
+			defer wg.Done()
+			for _, url := range urls {
+				ticker, _ := fetchTicker(url)
+				if ticker != nil {
+					mu.Lock()
+					tickers = append(tickers, *ticker)
+					mu.Unlock()
+				}
+			}
+		}(chunk)
 	}
 
-	jsonContent, err := json.Marshal(tickers)
+	wg.Wait()
+
+	jsonContent, err := json.Marshal(Resource{Tickers: tickers})
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 	fmt.Println(string(jsonContent))
+}
+
+func fetchTicker(url string) (*Ticker, error) {
+	content, err := fetch(url)
+	if err != nil {
+		return nil, err
+	}
+
+	doc, err := goquery.NewDocumentFromReader(content)
+	if err != nil {
+		return nil, err
+	}
+
+	ticker := &Ticker{
+		Nome:     doc.Find(nomeSelector).Text(),
+		DY:       doc.Find(dySelector).Text(),
+		PVP:      doc.Find(pvpSelector).Text(),
+		Segmento: doc.Find(segmentoSelector).Text(),
+	}
+
+	return ticker, nil
 }
 
 func fetch(URL string) (io.Reader, error) {
